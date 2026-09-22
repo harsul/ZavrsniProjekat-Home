@@ -36,8 +36,6 @@ private slots:
 private:
     Ui::MainWindow *ui;
 
-    QList<Transaction> m_transactions;
-
     QComboBox *m_typeCombo;
     QComboBox *m_categoryCombo;
     QDateEdit *m_dateEdit;
@@ -59,9 +57,6 @@ private:
     void refreshTransactionTable();
     void refreshMonthlySummary();
     void refreshChart();
-    void saveData();
-    void loadData();
-    QString dataFilePath();
 };
 
 #endif // MAINWINDOW_H

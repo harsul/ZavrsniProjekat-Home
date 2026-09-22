@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "database.h"
 
 #include <QTabWidget>
 #include <QVBoxLayout>
@@ -9,12 +10,6 @@
 #include <QPushButton>
 #include <QHeaderView>
 #include <QMessageBox>
-#include <QFile>
-#include <QJsonDocument>
-#include <QJsonArray>
-#include <QJsonObject>
-#include <QStandardPaths>
-#include <QDir>
 #include <QFont>
 #include <QFrame>
 
@@ -50,8 +45,12 @@ MainWindow::MainWindow(QWidget *parent) :
     ui->setupUi(this);
     setWindowTitle("Kucni Budzet");
     resize(950, 650);
+
+    if (!Database::instance().open()) {
+        QMessageBox::critical(this, "Greska", "Nije moguce otvoriti bazu podataka!");
+    }
+
     setupUi();
-    loadData();
     refreshTransactionTable();
     refreshMonthlySummary();
     refreshChart();
@@ -59,7 +58,7 @@ MainWindow::MainWindow(QWidget *parent) :
 
 MainWindow::~MainWindow()
 {
-    saveData();
+    Database::instance().close();
     delete ui;
 }
 
@@ -285,12 +284,14 @@ void MainWindow::addTransaction()
     t.amount = m_amountSpin->value();
     t.description = m_descriptionEdit->text().trimmed();
 
-    m_transactions.append(t);
+    if (!Database::instance().addTransaction(t)) {
+        QMessageBox::warning(this, "Greska", "Nije moguce sacuvati transakciju u bazu.");
+        return;
+    }
 
     m_amountSpin->setValue(0.00);
     m_descriptionEdit->clear();
 
-    saveData();
     refreshTransactionTable();
     refreshMonthlySummary();
     refreshChart();
@@ -304,13 +305,14 @@ void MainWindow::deleteTransaction()
         return;
     }
 
+    int id = m_transactionTable->item(row, 0)->data(Qt::UserRole).toInt();
+
     QMessageBox::StandardButton reply = QMessageBox::question(this, "Potvrda",
         "Da li ste sigurni da zelite obrisati ovu transakciju?",
         QMessageBox::Yes | QMessageBox::No);
 
     if (reply == QMessageBox::Yes) {
-        m_transactions.removeAt(row);
-        saveData();
+        Database::instance().removeTransaction(id);
         refreshTransactionTable();
         refreshMonthlySummary();
         refreshChart();
@@ -319,25 +321,15 @@ void MainWindow::deleteTransaction()
 
 void MainWindow::refreshTransactionTable()
 {
-    m_transactionTable->setRowCount(0);
+    QList<Transaction> transactions = Database::instance().allTransactions();
 
-    QList<Transaction> sorted = m_transactions;
-    for (int i = 0; i < sorted.size() - 1; i++) {
-        for (int j = 0; j < sorted.size() - i - 1; j++) {
-            if (sorted[j].date < sorted[j + 1].date) {
-                Transaction temp = sorted[j];
-                sorted[j] = sorted[j + 1];
-                sorted[j + 1] = temp;
-            }
-        }
-    }
-
-    m_transactionTable->setRowCount(sorted.size());
-    for (int i = 0; i < sorted.size(); i++) {
-        const Transaction &t = sorted[i];
+    m_transactionTable->setRowCount(transactions.size());
+    for (int i = 0; i < transactions.size(); i++) {
+        const Transaction &t = transactions[i];
 
         QTableWidgetItem *dateItem = new QTableWidgetItem(t.date.toString("dd.MM.yyyy"));
         dateItem->setTextAlignment(Qt::AlignCenter);
+        dateItem->setData(Qt::UserRole, t.id);
 
         QString typeStr = (t.type == Transaction::Income) ? "Prihod" : "Rashod";
         QTableWidgetItem *typeItem = new QTableWidgetItem(typeStr);
@@ -372,18 +364,8 @@ void MainWindow::refreshMonthlySummary()
     int month = m_filterMonth->currentIndex() + 1;
     int year = m_filterYear->value();
 
-    double totalIncome = 0;
-    double totalExpense = 0;
-
-    for (int i = 0; i < m_transactions.size(); i++) {
-        const Transaction &t = m_transactions[i];
-        if (t.date.month() == month && t.date.year() == year) {
-            if (t.type == Transaction::Income)
-                totalIncome += t.amount;
-            else
-                totalExpense += t.amount;
-        }
-    }
+    double totalIncome = Database::instance().monthlyTotal(year, month, Transaction::Income);
+    double totalExpense = Database::instance().monthlyTotal(year, month, Transaction::Expense);
 
     m_totalIncomeLabel->setText(QString::number(totalIncome, 'f', 2) + " KM");
     m_totalExpenseLabel->setText(QString::number(totalExpense, 'f', 2) + " KM");
@@ -400,20 +382,8 @@ void MainWindow::refreshMonthlySummary()
 void MainWindow::refreshChart()
 {
     int year = m_chartYearSpin->value();
-    QVector<double> incomes(12, 0);
-    QVector<double> expenses(12, 0);
-
-    for (int i = 0; i < m_transactions.size(); i++) {
-        const Transaction &t = m_transactions[i];
-        if (t.date.year() == year) {
-            int month = t.date.month() - 1;
-            if (t.type == Transaction::Income)
-                incomes[month] += t.amount;
-            else
-                expenses[month] += t.amount;
-        }
-    }
-
+    QVector<double> incomes, expenses;
+    Database::instance().yearlyTotals(year, incomes, expenses);
     m_chart->setData(incomes, expenses, year);
 }
 
@@ -430,48 +400,4 @@ void MainWindow::onYearFilterChanged()
 void MainWindow::onChartYearChanged(int)
 {
     refreshChart();
-}
-
-QString MainWindow::dataFilePath()
-{
-    QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    QDir dir(path);
-    if (!dir.exists())
-        dir.mkpath(".");
-    return path + "/budget_data.json";
-}
-
-void MainWindow::saveData()
-{
-    QJsonArray array;
-    for (int i = 0; i < m_transactions.size(); i++) {
-        array.append(m_transactions[i].toJson());
-    }
-
-    QJsonDocument doc(array);
-    QFile file(dataFilePath());
-    if (file.open(QIODevice::WriteOnly)) {
-        file.write(doc.toJson());
-        file.close();
-    }
-}
-
-void MainWindow::loadData()
-{
-    QFile file(dataFilePath());
-    if (!file.exists())
-        return;
-
-    if (file.open(QIODevice::ReadOnly)) {
-        QByteArray data = file.readAll();
-        file.close();
-
-        QJsonDocument doc = QJsonDocument::fromJson(data);
-        QJsonArray array = doc.array();
-
-        m_transactions.clear();
-        for (int i = 0; i < array.size(); i++) {
-            m_transactions.append(Transaction::fromJson(array[i].toObject()));
-        }
-    }
 }
